@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
@@ -32,12 +33,12 @@ extern void ITM_SendChar(uint8_t ch);
 #define RAM_SIZE (20U * 1024U)
 #define RAM_END (RAM_START + RAM_SIZE)
 
-#define T1_STACK_START (RAM_END)
-#define T2_STACK_START (RAM_END - TASK_STACK_SIZE)
-#define T3_STACK_START (RAM_END - 2 * TASK_STACK_SIZE)
-#define T4_STACK_START (RAM_END - 3 * TASK_STACK_SIZE)
-#define IDLE_STACK_START (RAM_END -4 * TASK_STACK_SIZE)
-#define SCHED_STACK_START (RAM_END - 5 * TASK_STACK_SIZE)
+#define SCHED_STACK_START (RAM_END)
+#define IDLE_STACK_START (RAM_END - TASK_STACK_SIZE)
+#define T1_STACK_START (RAM_END - 2 * TASK_STACK_SIZE)
+#define T2_STACK_START (RAM_END - 3 * TASK_STACK_SIZE)
+#define T3_STACK_START (RAM_END -4 * TASK_STACK_SIZE)
+#define T4_STACK_START (RAM_END - 5 * TASK_STACK_SIZE)
 
 #define TICK_FREQ			1000u
 #define HSI_CLOCK			8000000u
@@ -48,12 +49,16 @@ extern void ITM_SendChar(uint8_t ch);
 #define RUNNING_STATE 0x00
 #define BLOCKED_STATE 0xFF
 
+#define DUMMY_XPSR 0x01000000
+
 void idle_task(void);
 void task_1(void);
 void task_2(void);
 void task_3(void);
 void task_4(void);
 
+void OsKernelInit(void);
+void OsCreateTask(void (*handler)(void));
 void SysTick_Init(uint32_t freq);
 __attribute__((naked)) void init_scheduler_stack(uint32_t sched_top_stack);
 void init_tasks_stack(void);
@@ -65,6 +70,7 @@ uint8_t current_task = 1;
 uint32_t g_tick_count;
 
 typedef struct {
+	uint32_t id;
 	uint32_t psp_value;
 	uint32_t block_count;
 	uint8_t current_state;
@@ -72,15 +78,19 @@ typedef struct {
 } TCB_t;
 
 TCB_t user_tasks[MAX_TASKS];
-
+uint32_t memPoolBitset = 0;
 
 int main(void)
 {
-	enable_processor_fault();
-	init_scheduler_stack(SCHED_STACK_START);
+//	enable_processor_fault();
+//	init_scheduler_stack(SCHED_STACK_START);
+	OsKernelInit();
 
-	init_tasks_stack();
-	SysTick_Init(TICK_FREQ);
+//	init_tasks_stack();
+	OsCreateTask(task_1);
+	OsCreateTask(task_2);
+	OsCreateTask(task_3);
+	OsCreateTask(task_4);
 
 	switch_sp_to_psp();
 
@@ -120,6 +130,49 @@ void task_4(void) {
 	}
 }
 
+void OsKernelInit() {
+	enable_processor_fault();
+//	init_scheduler_stack(SCHED_STACK_START);
+	OsCreateTask(idle_task);
+	SysTick_Init(TICK_FREQ);
+}
+
+void OsCreateTask(void (*handler)(void)) {
+	// Get the unallocated ID
+	uint32_t taskID = 0;
+	uint32_t *psp;
+
+	for (uint8_t i = 0; i < MAX_TASKS; i++) {
+		if ((memPoolBitset & (1 << (31 - i))) == 0) {
+			taskID = i;
+			memPoolBitset |= (1 << (31 - i));
+			break;
+		}
+	}
+	user_tasks[taskID].id = taskID;
+	user_tasks[taskID].task_handler = handler;
+	user_tasks[taskID].current_state = RUNNING_STATE;
+	user_tasks[taskID].psp_value = IDLE_STACK_START - taskID * 1024;
+
+	// Init task's stack
+	psp = (uint32_t *)user_tasks[taskID].psp_value;
+	psp--;
+	*psp = DUMMY_XPSR; //0x01000000
+
+	psp--; // PC
+	*psp = (uint32_t)user_tasks[taskID].task_handler;
+
+	psp--; //LR
+	*psp = 0xFFFFFFFD;
+
+	for(int j = 0; j <13; j++) {
+		psp--;
+		*psp = 0;
+	}
+
+	user_tasks[taskID].psp_value = (uint32_t)psp;
+}
+
 void yield(void) {
 	uint32_t *ICSR = (uint32_t*)0xE000ED04;
 
@@ -154,7 +207,7 @@ __attribute__((naked)) void init_scheduler_stack(uint32_t sched_top_stack) {
 	__asm volatile("BX LR");
 }
 
-#define DUMMY_XPSR 0x01000000
+
 void init_tasks_stack(void) {
 	uint32_t *psp;
 
