@@ -59,8 +59,8 @@ void task_4(void);
 
 void OsKernelInit(void);
 void OsCreateTask(void (*handler)(void));
+void OsStartScheduler(void);
 void SysTick_Init(uint32_t freq);
-__attribute__((naked)) void init_scheduler_stack(uint32_t sched_top_stack);
 void init_tasks_stack(void);
 void enable_processor_fault();
 __attribute__((naked)) void switch_sp_to_psp(void);
@@ -82,19 +82,14 @@ uint32_t memPoolBitset = 0;
 
 int main(void)
 {
-//	enable_processor_fault();
-//	init_scheduler_stack(SCHED_STACK_START);
 	OsKernelInit();
 
-//	init_tasks_stack();
 	OsCreateTask(task_1);
 	OsCreateTask(task_2);
 	OsCreateTask(task_3);
 	OsCreateTask(task_4);
 
-	switch_sp_to_psp();
-
-	task_1();
+	OsStartScheduler();
 	for(;;);
 }
 
@@ -132,7 +127,6 @@ void task_4(void) {
 
 void OsKernelInit() {
 	enable_processor_fault();
-//	init_scheduler_stack(SCHED_STACK_START);
 	OsCreateTask(idle_task);
 	SysTick_Init(TICK_FREQ);
 }
@@ -173,6 +167,11 @@ void OsCreateTask(void (*handler)(void)) {
 	user_tasks[taskID].psp_value = (uint32_t)psp;
 }
 
+void OsStartScheduler(void) {
+	switch_sp_to_psp();
+	user_tasks[1].task_handler();
+}
+
 void yield(void) {
 	uint32_t *ICSR = (uint32_t*)0xE000ED04;
 
@@ -200,55 +199,6 @@ void SysTick_Init(uint32_t freq) {
 	*pSYST_CSR |= (1 << 2);
 	*pSYST_CSR |= (1 << 0);
 
-}
-
-__attribute__((naked)) void init_scheduler_stack(uint32_t sched_top_stack) {
-	__asm volatile("MSR MSP,%0": : "r" (sched_top_stack) : );
-	__asm volatile("BX LR");
-}
-
-
-void init_tasks_stack(void) {
-	uint32_t *psp;
-
-	user_tasks[0].current_state = RUNNING_STATE;
-	user_tasks[1].current_state = RUNNING_STATE;
-	user_tasks[2].current_state = RUNNING_STATE;
-	user_tasks[3].current_state = RUNNING_STATE;
-	user_tasks[4].current_state = RUNNING_STATE;
-
-	user_tasks[0].psp_value = IDLE_STACK_START;
-	user_tasks[1].psp_value = T1_STACK_START;
-	user_tasks[2].psp_value = T2_STACK_START;
-	user_tasks[3].psp_value = T3_STACK_START;
-	user_tasks[4].psp_value = T4_STACK_START;
-
-	user_tasks[0].task_handler = idle_task;
-	user_tasks[1].task_handler = task_1;
-	user_tasks[2].task_handler = task_2;
-	user_tasks[3].task_handler = task_3;
-	user_tasks[4].task_handler = task_4;
-
-	for(int i = 0; i < MAX_TASKS; i++) {
-		psp = (uint32_t *)user_tasks[i].psp_value;
-
-		psp--;
-		*psp = DUMMY_XPSR; //0x01000000
-
-		psp--; // PC
-		*psp = (uint32_t)user_tasks[i].task_handler;
-
-		psp--; //LR
-		*psp = 0xFFFFFFFD;
-
-		for(int j = 0; j <13; j++) {
-			psp--;
-			*psp = 0;
-		}
-
-		user_tasks[i].psp_value = (uint32_t)psp;
-
-	}
 }
 
 void enable_processor_fault() {
