@@ -19,6 +19,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <os_kernel.h>
+#include <os_queue_utils.h>
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
@@ -44,8 +46,6 @@ extern void ITM_SendChar(uint8_t ch);
 #define HSI_CLOCK			8000000u
 #define SYSTICK_CLK			HSI_CLOCK
 
-#define MAX_TASKS 5
-
 #define RUNNING_STATE 0x00
 #define BLOCKED_STATE 0xFF
 
@@ -58,36 +58,29 @@ void task_3(void);
 void task_4(void);
 
 void OsKernelInit(void);
-void OsCreateTask(void (*handler)(void));
+void OsCreateTask(void (*handler)(void), uint8_t priority);
 void OsStartScheduler(void);
 void SysTick_Init(uint32_t freq);
-void init_tasks_stack(void);
 void enable_processor_fault();
 __attribute__((naked)) void switch_sp_to_psp(void);
 void task_delay(uint32_t tick_count);
 
 uint8_t current_task = 1;
 uint32_t g_tick_count;
-
-typedef struct {
-	uint32_t id;
-	uint32_t psp_value;
-	uint32_t block_count;
-	uint8_t current_state;
-	void (*task_handler)(void);
-} TCB_t;
+uint8_t numberCreatedTask = 0;
 
 TCB_t user_tasks[MAX_TASKS];
 uint32_t memPoolBitset = 0;
+MaxHeap taskQueue;
 
 int main(void)
 {
 	OsKernelInit();
 
-	OsCreateTask(task_1);
-	OsCreateTask(task_2);
-	OsCreateTask(task_3);
-	OsCreateTask(task_4);
+	OsCreateTask(task_1, 1);
+//	OsCreateTask(task_2);
+//	OsCreateTask(task_3);
+	OsCreateTask(task_4, 1);
 
 	OsStartScheduler();
 	for(;;);
@@ -100,7 +93,7 @@ void idle_task(void) {
 void task_1(void) {
 	while(1) {
 		printf("Task 1\n");
-		task_delay(1000);
+//		task_delay(1000);
 	}
 }
 
@@ -121,40 +114,45 @@ void task_3(void) {
 void task_4(void) {
 	while(1) {
 		printf("Task 4\n");
-		task_delay(8000);
+//		task_delay(8000);
 	}
 }
 
 void OsKernelInit() {
 	enable_processor_fault();
-	OsCreateTask(idle_task);
+	OsHeapInit(&taskQueue);
+	OsCreateTask(idle_task, 0);
 	SysTick_Init(TICK_FREQ);
 }
 
-void OsCreateTask(void (*handler)(void)) {
+void OsCreateTask(void (*handler)(void), uint8_t priority) {
 	// Get the unallocated ID
 	uint32_t taskID = 0;
 	uint32_t *psp;
+	TCB_t *newTask;
 
 	for (uint8_t i = 0; i < MAX_TASKS; i++) {
 		if ((memPoolBitset & (1 << (31 - i))) == 0) {
+			numberCreatedTask++;
 			taskID = i;
 			memPoolBitset |= (1 << (31 - i));
 			break;
 		}
 	}
-	user_tasks[taskID].id = taskID;
-	user_tasks[taskID].task_handler = handler;
-	user_tasks[taskID].current_state = RUNNING_STATE;
-	user_tasks[taskID].psp_value = IDLE_STACK_START - taskID * 1024;
+	newTask = (TCB_t *)malloc(sizeof(TCB_t));
+	newTask->id = taskID;
+	newTask->task_handler = handler;
+	newTask->current_state = RUNNING_STATE;
+	newTask->psp_value = IDLE_STACK_START - taskID * 1024;
+	newTask->priority = priority;
 
 	// Init task's stack
-	psp = (uint32_t *)user_tasks[taskID].psp_value;
+	psp = (uint32_t *)newTask->psp_value;
 	psp--;
 	*psp = DUMMY_XPSR; //0x01000000
 
 	psp--; // PC
-	*psp = (uint32_t)user_tasks[taskID].task_handler;
+	*psp = (uint32_t)newTask->task_handler;
 
 	psp--; //LR
 	*psp = 0xFFFFFFFD;
@@ -164,12 +162,16 @@ void OsCreateTask(void (*handler)(void)) {
 		*psp = 0;
 	}
 
-	user_tasks[taskID].psp_value = (uint32_t)psp;
+	newTask->psp_value = (uint32_t)psp;
+	OsHeapInsert(&taskQueue, newTask);
 }
 
 void OsStartScheduler(void) {
+	TCB_t *task;
+
 	switch_sp_to_psp();
-	user_tasks[1].task_handler();
+	task = OsHeapPeek(&taskQueue);
+	task->task_handler();
 }
 
 void yield(void) {
@@ -211,7 +213,9 @@ void enable_processor_fault() {
 }
 
 uint32_t get_psp_value(void) {
-	return user_tasks[current_task].psp_value;
+	TCB_t *task;
+	task = OsHeapPeek(&taskQueue);
+	return task->psp_value;
 }
 
 __attribute__((naked)) void switch_sp_to_psp(void) {
@@ -228,22 +232,28 @@ __attribute__((naked)) void switch_sp_to_psp(void) {
 }
 
 void save_psp_value(uint32_t current_psp_value) {
-	user_tasks[current_task].psp_value = current_psp_value;
+	TCB_t *task;
+	task = OsHeapPeek(&taskQueue);
+	task->psp_value = current_psp_value;
 }
 
 void update_next_task(void) {
 	int state = BLOCKED_STATE;
+	TCB_t *task;
 
-	for(int i = 0; i < MAX_TASKS; i++) {
-		current_task++;
-		current_task %= MAX_TASKS;
-		state = user_tasks[current_task].current_state;
-		if((state == RUNNING_STATE) && (current_task != 0))
-			break;
-	}
+	task = OsHeapExtract(&taskQueue);
+	OsHeapInsert(&taskQueue, task);
 
-	if(state != RUNNING_STATE)
-		current_task = 0;
+//	for(int i = 0; i < numberCreatedTask; i++) {
+//		current_task++;
+//		current_task %= numberCreatedTask;
+//		state = user_tasks[current_task].current_state;
+//		if((state == RUNNING_STATE) && (current_task != 0))
+//			break;
+//	}
+//
+//	if(state != RUNNING_STATE)
+//		current_task = 0;
 }
 
 void unblock_tasks(void) {
