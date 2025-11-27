@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <os_kernel.h>
 #include <os_queue_utils.h>
+#include <os_blocked_queue.h>
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
@@ -72,6 +73,8 @@ uint8_t numberCreatedTask = 0;
 TCB_t user_tasks[MAX_TASKS];
 uint32_t memPoolBitset = 0;
 MaxHeap taskQueue;
+MinHeap blockedQueue;
+TCB_t *currentTask;
 
 int main(void)
 {
@@ -93,7 +96,7 @@ void idle_task(void) {
 void task_1(void) {
 	while(1) {
 		printf("Task 1\n");
-//		task_delay(1000);
+		task_delay(1000);
 	}
 }
 
@@ -114,13 +117,14 @@ void task_3(void) {
 void task_4(void) {
 	while(1) {
 		printf("Task 4\n");
-//		task_delay(8000);
+		task_delay(2100);
 	}
 }
 
 void OsKernelInit() {
 	enable_processor_fault();
 	OsHeapInit(&taskQueue);
+	OsMinHeapInit(&blockedQueue);
 	OsCreateTask(idle_task, 0);
 	SysTick_Init(TICK_FREQ);
 }
@@ -167,11 +171,9 @@ void OsCreateTask(void (*handler)(void), uint8_t priority) {
 }
 
 void OsStartScheduler(void) {
-	TCB_t *task;
-
+	currentTask = OsHeapPeek(&taskQueue);
 	switch_sp_to_psp();
-	task = OsHeapPeek(&taskQueue);
-	task->task_handler();
+	currentTask->task_handler();
 }
 
 void yield(void) {
@@ -181,11 +183,13 @@ void yield(void) {
 }
 
 void task_delay(uint32_t tick_count) {
-	if(current_task) {
-		user_tasks[current_task].block_count = g_tick_count + tick_count;
-		user_tasks[current_task].current_state = BLOCKED_STATE;
-		yield();
-	}
+	TCB_t *task;
+
+	task = OsHeapExtract(&taskQueue);
+	task->block_count = g_tick_count + tick_count;
+	task->current_state = BLOCKED_STATE;
+	OsMinHeapInsert(&blockedQueue, task);
+	yield();
 }
 
 void SysTick_Init(uint32_t freq) {
@@ -213,9 +217,8 @@ void enable_processor_fault() {
 }
 
 uint32_t get_psp_value(void) {
-	TCB_t *task;
-	task = OsHeapPeek(&taskQueue);
-	return task->psp_value;
+//	currentTask = OsHeapPeek(&taskQueue);
+	return currentTask->psp_value;
 }
 
 __attribute__((naked)) void switch_sp_to_psp(void) {
@@ -232,17 +235,16 @@ __attribute__((naked)) void switch_sp_to_psp(void) {
 }
 
 void save_psp_value(uint32_t current_psp_value) {
-	TCB_t *task;
-	task = OsHeapPeek(&taskQueue);
-	task->psp_value = current_psp_value;
+//	currentTask = OsHeapPeek(&taskQueue);
+	currentTask->psp_value = current_psp_value;
 }
 
 void update_next_task(void) {
-	int state = BLOCKED_STATE;
-	TCB_t *task;
-
-	task = OsHeapExtract(&taskQueue);
-	OsHeapInsert(&taskQueue, task);
+	if (currentTask->current_state != BLOCKED_STATE && currentTask->id != 0) {
+		(void)OsHeapExtract(&taskQueue);
+		OsHeapInsert(&taskQueue, currentTask);
+	}
+	currentTask = OsHeapPeek(&taskQueue);
 
 //	for(int i = 0; i < numberCreatedTask; i++) {
 //		current_task++;
@@ -257,19 +259,31 @@ void update_next_task(void) {
 }
 
 void unblock_tasks(void) {
-	for(int i = 1; i < MAX_TASKS; i++) {
-		if (user_tasks[i].current_state != RUNNING_STATE) {
-			if (user_tasks[i].block_count == g_tick_count) {
-				user_tasks[i].current_state = RUNNING_STATE;
-			}
-		}
+//	for(int i = 1; i < MAX_TASKS; i++) {
+//		if (user_tasks[i].current_state != RUNNING_STATE) {
+//			if (user_tasks[i].block_count == g_tick_count) {
+//				user_tasks[i].current_state = RUNNING_STATE;
+//			}
+//		}
+//	}
+	TCB_t *task;
+
+	if (blockedQueue.size == 0)
+		return;
+
+	task = OsMinHeapPeek(&blockedQueue);
+	if (task->block_count == g_tick_count) {
+		task = OsMinHeapExtract(&blockedQueue);
+		task->current_state = RUNNING_STATE;
+		OsHeapInsert(&taskQueue, task);
 	}
 }
 
 void SysTick_Handler(void) {
 	g_tick_count++;
 	unblock_tasks();
-	yield();
+	if (taskQueue.size != 1)
+		yield();
 }
 
 __attribute__((naked)) void PendSV_Handler(void) {
