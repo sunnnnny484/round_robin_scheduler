@@ -117,7 +117,7 @@ void task_3(void) {
 void task_4(void) {
 	while(1) {
 		printf("Task 4\n");
-		task_delay(2100);
+		task_delay(2000);
 	}
 }
 
@@ -272,7 +272,7 @@ void unblock_tasks(void) {
 		return;
 
 	task = OsMinHeapPeek(&blockedQueue);
-	if (task->block_count == g_tick_count) {
+	if (task->block_count <= g_tick_count) {
 		task = OsMinHeapExtract(&blockedQueue);
 		task->current_state = RUNNING_STATE;
 		OsHeapInsert(&taskQueue, task);
