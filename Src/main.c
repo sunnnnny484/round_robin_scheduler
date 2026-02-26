@@ -22,6 +22,7 @@
 #include <os_kernel.h>
 #include <os_queue_utils.h>
 #include <os_blocked_queue.h>
+#include <os_semaphore.h>
 
 #if !defined(__SOFT_FP__) && defined(__ARM_FP)
   #warning "FPU is not initialized, but the project is compiling for an FPU. Please initialize the FPU before use."
@@ -46,9 +47,6 @@ extern void ITM_SendChar(uint8_t ch);
 #define TICK_FREQ			1000u
 #define HSI_CLOCK			8000000u
 #define SYSTICK_CLK			HSI_CLOCK
-
-#define RUNNING_STATE 0x00
-#define BLOCKED_STATE 0xFF
 
 #define DUMMY_XPSR 0x01000000
 
@@ -75,14 +73,14 @@ uint32_t memPoolBitset = 0;
 MaxHeap taskQueue;
 MinHeap blockedQueue;
 TCB_t *currentTask;
+OsSemaphore_t mutex_sem;
 
 int main(void)
 {
 	OsKernelInit();
 
 	OsCreateTask(task_1, 1);
-//	OsCreateTask(task_2);
-//	OsCreateTask(task_3);
+	OsCreateTask(task_2, 1);
 	OsCreateTask(task_4, 1);
 
 	OsStartScheduler();
@@ -95,15 +93,23 @@ void idle_task(void) {
 
 void task_1(void) {
 	while(1) {
-		printf("Task 1\n");
+		printf("[T1] waiting for sem...\n");
+		OsSemWait(&mutex_sem);
+		printf("[T1] acquired sem, working...\n");
 		task_delay(1000);
+		printf("[T1] releasing sem\n");
+		OsSemSignal(&mutex_sem);
 	}
 }
 
 void task_2(void) {
 	while(1) {
-		printf("Task 2\n");
-		task_delay(2000);
+		printf("[T2] waiting for sem...\n");
+		OsSemWait(&mutex_sem);
+		printf("[T2] acquired sem, working...\n");
+		task_delay(500);
+		printf("[T2] releasing sem\n");
+		OsSemSignal(&mutex_sem);
 	}
 }
 
@@ -116,8 +122,12 @@ void task_3(void) {
 
 void task_4(void) {
 	while(1) {
-		printf("Task 4\n");
+		printf("[T4] waiting for sem...\n");
+		OsSemWait(&mutex_sem);
+		printf("[T4] acquired sem, working...\n");
 		task_delay(2000);
+		printf("[T4] releasing sem\n");
+		OsSemSignal(&mutex_sem);
 	}
 }
 
@@ -125,6 +135,7 @@ void OsKernelInit() {
 	enable_processor_fault();
 	OsHeapInit(&taskQueue);
 	OsMinHeapInit(&blockedQueue);
+	OsSemInit(&mutex_sem, 1);   /* mutex: ban đầu available */
 	OsCreateTask(idle_task, 0);
 	SysTick_Init(TICK_FREQ);
 }
@@ -240,7 +251,7 @@ void save_psp_value(uint32_t current_psp_value) {
 }
 
 void update_next_task(void) {
-	if (currentTask->current_state != BLOCKED_STATE && currentTask->id != 0) {
+	if (currentTask->current_state == RUNNING_STATE && currentTask->id != 0) {
 		(void)OsHeapExtract(&taskQueue);
 		OsHeapInsert(&taskQueue, currentTask);
 	}

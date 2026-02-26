@@ -10,6 +10,10 @@
 
 #define MAX_TASKS 5
 
+#define RUNNING_STATE     0x00
+#define BLOCKED_STATE     0xFF
+#define SEM_BLOCKED_STATE 0xFE
+
 typedef struct {
 	uint32_t id;
 	uint32_t psp_value;
